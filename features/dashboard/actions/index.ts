@@ -78,6 +78,8 @@ export const editProjectById = async (
       where: { id },
       data: data,
     });
+
+    revalidatePath("/dashboard");
   } catch (error) {
     console.error(error);
   }
@@ -101,7 +103,6 @@ export const duplicateProjectById = async (id: string) => {
         userId: originalPlayground.userId,
       },
     });
-
     revalidatePath("/dashboard");
     return duplicatedPlayground;
   } catch (error) {
