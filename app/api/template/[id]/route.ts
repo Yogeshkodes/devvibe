@@ -1,4 +1,7 @@
-import { readTemplateStructureFromJson, saveTemplateStructureToJson } from "@/features/playground/libs/path-to-json";
+import {
+  readTemplateStructureFromJson,
+  saveTemplateStructureToJson,
+} from "@/features/playground/lib/path-to-json";
 import { db } from "@/lib/db";
 import { templatePaths } from "@/lib/template";
 import path from "path";
@@ -55,17 +58,23 @@ export async function GET(
 
     // Validate the JSON structure before saving
     if (!validateJsonStructure(result.items)) {
-      return Response.json({ error: "Invalid JSON structure" }, { status: 500 });
+      return Response.json(
+        { error: "Invalid JSON structure" },
+        { status: 500 }
+      );
     }
-
-
 
     await fs.unlink(outputFile);
 
-    return Response.json({ success: true, templateJson: result }, { status: 200 });
+    return Response.json(
+      { success: true, templateJson: result },
+      { status: 200 }
+    );
   } catch (error) {
     console.error("Error generating template JSON:", error);
-    return Response.json({ error: "Failed to generate template" }, { status: 500 });
+    return Response.json(
+      { error: "Failed to generate template" },
+      { status: 500 }
+    );
   }
 }
-
