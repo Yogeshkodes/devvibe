@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useState, useRef } from "react";
-
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { transformToWebContainerFormat } from "../hooks/transformer";
-import { CheckCircle, Loader2, XCircle } from "lucide-react";
+import { CheckCircle, Loader2, XCircle, RotateCcw } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
 import TerminalComponent from "./terminal";
 import { WebContainer } from "@webcontainer/api";
 import { TemplateFolder } from "@/features/playground/types";
@@ -16,7 +16,8 @@ interface WebContainerPreviewProps {
   error: string | null;
   instance: WebContainer | null;
   writeFileSync: (path: string, content: string) => Promise<void>;
-  forceResetup?: boolean; // Optional prop to force re-setup
+  forceResetup?: boolean;
+  restart?: () => Promise<void>; // Add restart prop
 }
 
 const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
@@ -27,6 +28,7 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
   serverUrl,
   writeFileSync,
   forceResetup = false,
+  restart,
 }) => {
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [loadingState, setLoadingState] = useState({
@@ -45,202 +47,305 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
   // Ref to access terminal methods
   const terminalRef = useRef<any>(null);
 
+  // Track server processes to prevent multiple startups
+  const serverProcessRef = useRef<any>(null);
+  const installProcessRef = useRef<any>(null);
+
   // Reset setup state when forceResetup changes
   useEffect(() => {
     if (forceResetup) {
-      setIsSetupComplete(false);
-      setIsSetupInProgress(false);
-      setPreviewUrl("");
-      setCurrentStep(0);
-      setLoadingState({
-        transforming: false,
-        mounting: false,
-        installing: false,
-        starting: false,
-        ready: false,
-      });
+      resetSetupState();
     }
   }, [forceResetup]);
 
+  const resetSetupState = useCallback(() => {
+    setIsSetupComplete(false);
+    setIsSetupInProgress(false);
+    setPreviewUrl("");
+    setCurrentStep(0);
+    setSetupError(null);
+    setLoadingState({
+      transforming: false,
+      mounting: false,
+      installing: false,
+      starting: false,
+      ready: false,
+    });
+
+    // Kill existing processes
+    if (serverProcessRef.current) {
+      try {
+        serverProcessRef.current.kill();
+      } catch (e) {
+        console.warn("Error killing server process:", e);
+      }
+      serverProcessRef.current = null;
+    }
+
+    if (installProcessRef.current) {
+      try {
+        installProcessRef.current.kill();
+      } catch (e) {
+        console.warn("Error killing install process:", e);
+      }
+      installProcessRef.current = null;
+    }
+  }, []);
+
+  const writeToTerminal = useCallback((message: string) => {
+    if (terminalRef.current?.writeToTerminal) {
+      terminalRef.current.writeToTerminal(message);
+    }
+  }, []);
+
+  const checkExistingSetup = useCallback(
+    async (instance: WebContainer) => {
+      try {
+        // Check if package.json exists
+        const packageJson = await instance.fs.readFile("package.json", "utf8");
+        const packageData = JSON.parse(packageJson);
+
+        // Check if node_modules exists
+        try {
+          const nodeModulesStats = await instance.fs.readdir("node_modules");
+          if (nodeModulesStats.length > 0) {
+            writeToTerminal(
+              "🔄 Found existing setup, checking server status...\r\n"
+            );
+            return { hasFiles: true, hasNodeModules: true, packageData };
+          }
+        } catch (e) {
+          // node_modules doesn't exist
+        }
+
+        return { hasFiles: true, hasNodeModules: false, packageData };
+      } catch (e) {
+        return { hasFiles: false, hasNodeModules: false, packageData: null };
+      }
+    },
+    [writeToTerminal]
+  );
+
+  const optimizePackageJson = useCallback(
+    async (instance: WebContainer, packageData: any) => {
+      // Optimize React startup by modifying package.json
+      if (
+        packageData?.scripts?.start &&
+        !packageData.scripts.start.includes("--host")
+      ) {
+        const optimizedPackageData = {
+          ...packageData,
+          scripts: {
+            ...packageData.scripts,
+            start: packageData.scripts.start.includes("react-scripts")
+              ? `${packageData.scripts.start} --host 0.0.0.0`
+              : packageData.scripts.start,
+          },
+        };
+
+        await instance.fs.writeFile(
+          "package.json",
+          JSON.stringify(optimizedPackageData, null, 2)
+        );
+
+        writeToTerminal("⚡ Optimized package.json for faster startup\r\n");
+      }
+    },
+    [writeToTerminal]
+  );
+
   useEffect(() => {
     async function setupContainer() {
-      // Don't run setup if it's already complete or in progress
       if (!instance || isSetupComplete || isSetupInProgress) return;
 
       try {
         setIsSetupInProgress(true);
         setSetupError(null);
 
-        // Check if server is already running by testing if files are already mounted
-        try {
-          const packageJsonExists = await instance.fs.readFile(
-            "package.json",
-            "utf8"
-          );
-          if (packageJsonExists) {
-            // Files are already mounted, just reconnect to existing server
-            if (terminalRef.current?.writeToTerminal) {
-              terminalRef.current.writeToTerminal(
-                "🔄 Reconnecting to existing WebContainer session...\r\n"
-              );
-            }
+        // Check existing setup
+        const { hasFiles, hasNodeModules, packageData } =
+          await checkExistingSetup(instance);
 
-            // Check if server is already running
-            instance.on("server-ready", (port: number, url: string) => {
-              console.log(`Reconnected to server on port ${port} at ${url}`);
-              if (terminalRef.current?.writeToTerminal) {
-                terminalRef.current.writeToTerminal(
-                  `🌐 Reconnected to server at ${url}\r\n`
-                );
-              }
-              setPreviewUrl(url);
-              setLoadingState((prev) => ({
-                ...prev,
-                starting: false,
-                ready: true,
-              }));
-              setIsSetupComplete(true);
-              setIsSetupInProgress(false);
-            });
+        if (hasFiles && hasNodeModules) {
+          writeToTerminal("🚀 Reconnecting to existing project...\r\n");
 
-            setCurrentStep(4);
-            setLoadingState((prev) => ({ ...prev, starting: true }));
-            return;
-          }
-        } catch (e) {
-          // Files don't exist, proceed with normal setup
-        }
+          // Optimize existing package.json
+          await optimizePackageJson(instance, packageData);
 
-        // Step 1: Transform data
-        setLoadingState((prev) => ({ ...prev, transforming: true }));
-        setCurrentStep(1);
+          // Try to start server directly
+          setCurrentStep(4);
+          setLoadingState((prev) => ({ ...prev, starting: true }));
 
-        // Write to terminal
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(
-            "🔄 Transforming template data...\r\n"
-          );
-        }
+          // Listen for server ready
+          const serverReadyHandler = (port: number, url: string) => {
+            writeToTerminal(`🌐 Server ready at ${url}\r\n`);
+            setPreviewUrl(url);
+            setLoadingState((prev) => ({
+              ...prev,
+              starting: false,
+              ready: true,
+            }));
+            setIsSetupComplete(true);
+            setIsSetupInProgress(false);
+          };
 
-        // @ts-ignore
-        const files = transformToWebContainerFormat(templateData);
+          instance.on("server-ready", serverReadyHandler);
 
-        setLoadingState((prev) => ({
-          ...prev,
-          transforming: false,
-          mounting: true,
-        }));
-        setCurrentStep(2);
+          // Start server
+          try {
+            const startProcess = await instance.spawn("npm", ["run", "start"]);
+            serverProcessRef.current = startProcess;
 
-        // Step 2: Mount files
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(
-            "📁 Mounting files to WebContainer...\r\n"
-          );
-        }
-
-        await instance.mount(files);
-
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(
-            "✅ Files mounted successfully\r\n"
-          );
-        }
-
-        setLoadingState((prev) => ({
-          ...prev,
-          mounting: false,
-          installing: true,
-        }));
-        setCurrentStep(3);
-
-        // Step 3: Install dependencies
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(
-            "📦 Installing dependencies...\r\n"
-          );
-        }
-
-        const installProcess = await instance.spawn("npm", ["install"]);
-
-        // Stream install output to terminal
-        installProcess.output.pipeTo(
-          new WritableStream({
-            write(data) {
-              // Write directly to terminal
-              if (terminalRef.current?.writeToTerminal) {
-                terminalRef.current.writeToTerminal(data);
-              }
-            },
-          })
-        );
-
-        const installExitCode = await installProcess.exit;
-
-        if (installExitCode !== 0) {
-          throw new Error(
-            `Failed to install dependencies. Exit code: ${installExitCode}`
-          );
-        }
-
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(
-            "✅ Dependencies installed successfully\r\n"
-          );
-        }
-
-        setLoadingState((prev) => ({
-          ...prev,
-          installing: false,
-          starting: true,
-        }));
-        setCurrentStep(4);
-
-        // Step 4: Start the server
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(
-            "🚀 Starting development server...\r\n"
-          );
-        }
-
-        const startProcess = await instance.spawn("npm", ["run", "start"]);
-
-        // Listen for server ready event
-        instance.on("server-ready", (port: number, url: string) => {
-          console.log(`Server ready on port ${port} at ${url}`);
-          if (terminalRef.current?.writeToTerminal) {
-            terminalRef.current.writeToTerminal(
-              `🌐 Server ready at ${url}\r\n`
+            // Stream output
+            startProcess.output.pipeTo(
+              new WritableStream({
+                write(data) {
+                  writeToTerminal(data);
+                },
+              })
             );
+
+            // If server doesn't start in 10 seconds, show error
+            setTimeout(() => {
+              if (!isSetupComplete) {
+                setSetupError(
+                  "Server taking too long to start. Try restarting."
+                );
+                setIsSetupInProgress(false);
+              }
+            }, 10000);
+          } catch (e) {
+            console.error("Failed to start existing server:", e);
+            // Fall through to full setup
           }
-          setPreviewUrl(url);
+        }
+
+        if (!hasFiles) {
+          // Full setup process
+
+          // Step 1: Transform data
+          setLoadingState((prev) => ({ ...prev, transforming: true }));
+          setCurrentStep(1);
+          writeToTerminal("📦 Transforming template data...\r\n");
+
+          // @ts-ignore
+          const files = transformToWebContainerFormat(templateData);
+
           setLoadingState((prev) => ({
             ...prev,
-            starting: false,
-            ready: true,
+            transforming: false,
+            mounting: true,
           }));
-          setIsSetupComplete(true);
-          setIsSetupInProgress(false);
-        });
+          setCurrentStep(2);
 
-        // Handle start process output - stream to terminal
-        startProcess.output.pipeTo(
-          new WritableStream({
-            write(data) {
-              if (terminalRef.current?.writeToTerminal) {
-                terminalRef.current.writeToTerminal(data);
-              }
-            },
-          })
-        );
+          // Step 2: Mount files
+          writeToTerminal("📁 Mounting files to WebContainer...\r\n");
+          await instance.mount(files);
+          writeToTerminal("✅ Files mounted successfully\r\n");
+
+          // Optimize package.json after mounting
+          try {
+            const packageJson = await instance.fs.readFile(
+              "package.json",
+              "utf8"
+            );
+            const packageData = JSON.parse(packageJson);
+            await optimizePackageJson(instance, packageData);
+          } catch (e) {
+            console.warn("Could not optimize package.json:", e);
+          }
+
+          setLoadingState((prev) => ({
+            ...prev,
+            mounting: false,
+            installing: true,
+          }));
+          setCurrentStep(3);
+
+          // Step 3: Install dependencies with optimizations
+          writeToTerminal(
+            "📦 Installing dependencies (this may take a moment)...\r\n"
+          );
+
+          // Use npm ci for faster installs if package-lock.json exists
+          let installCmd = "install";
+          try {
+            await instance.fs.readFile("package-lock.json", "utf8");
+            installCmd = "ci";
+            writeToTerminal("🔧 Using npm ci for faster installation...\r\n");
+          } catch (e) {
+            // package-lock.json doesn't exist, use regular install
+          }
+
+          const installProcess = await instance.spawn("npm", [
+            installCmd,
+            "--silent",
+          ]);
+          installProcessRef.current = installProcess;
+
+          // Stream install output
+          installProcess.output.pipeTo(
+            new WritableStream({
+              write(data) {
+                writeToTerminal(data);
+              },
+            })
+          );
+
+          const installExitCode = await installProcess.exit;
+          installProcessRef.current = null;
+
+          if (installExitCode !== 0) {
+            throw new Error(
+              `Failed to install dependencies. Exit code: ${installExitCode}`
+            );
+          }
+
+          writeToTerminal("✅ Dependencies installed successfully\r\n");
+        }
+
+        // Start server if not already started
+        if (!previewUrl) {
+          setLoadingState((prev) => ({
+            ...prev,
+            installing: false,
+            starting: true,
+          }));
+          setCurrentStep(4);
+
+          writeToTerminal("🚀 Starting development server...\r\n");
+
+          // Listen for server ready
+          const serverReadyHandler = (port: number, url: string) => {
+            writeToTerminal(`🌐 Server ready at ${url}\r\n`);
+            setPreviewUrl(url);
+            setLoadingState((prev) => ({
+              ...prev,
+              starting: false,
+              ready: true,
+            }));
+            setIsSetupComplete(true);
+            setIsSetupInProgress(false);
+          };
+
+          instance.on("server-ready", serverReadyHandler);
+
+          const startProcess = await instance.spawn("npm", ["run", "start"]);
+          serverProcessRef.current = startProcess;
+
+          // Stream output
+          startProcess.output.pipeTo(
+            new WritableStream({
+              write(data) {
+                writeToTerminal(data);
+              },
+            })
+          );
+        }
       } catch (err) {
         console.error("Error setting up container:", err);
         const errorMessage = err instanceof Error ? err.message : String(err);
-
-        if (terminalRef.current?.writeToTerminal) {
-          terminalRef.current.writeToTerminal(`❌ Error: ${errorMessage}\r\n`);
-        }
-
+        writeToTerminal(`❌ Error: ${errorMessage}\r\n`);
         setSetupError(errorMessage);
         setIsSetupInProgress(false);
         setLoadingState({
@@ -254,15 +359,43 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
     }
 
     setupContainer();
-  }, [instance, templateData, isSetupComplete, isSetupInProgress]);
+  }, [
+    instance,
+    templateData,
+    isSetupComplete,
+    isSetupInProgress,
+    checkExistingSetup,
+    optimizePackageJson,
+    writeToTerminal,
+  ]);
 
-  // Cleanup function to prevent memory leaks
+  // Cleanup processes on unmount
   useEffect(() => {
     return () => {
-      // Don't kill processes or cleanup when component unmounts
-      // The WebContainer should persist across component re-mounts
+      // Clean up processes but don't kill WebContainer
+      if (serverProcessRef.current) {
+        try {
+          serverProcessRef.current.kill();
+        } catch (e) {
+          console.warn("Error killing server process on unmount:", e);
+        }
+      }
+      if (installProcessRef.current) {
+        try {
+          installProcessRef.current.kill();
+        } catch (e) {
+          console.warn("Error killing install process on unmount:", e);
+        }
+      }
     };
   }, []);
+
+  const handleRestart = useCallback(async () => {
+    resetSetupState();
+    if (restart) {
+      await restart();
+    }
+  }, [resetSetupState, restart]);
 
   if (isLoading) {
     return (
@@ -286,7 +419,13 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
             <XCircle className="h-5 w-5" />
             <h3 className="font-semibold">Error</h3>
           </div>
-          <p className="text-sm">{error || setupError}</p>
+          <p className="text-sm mb-4">{error || setupError}</p>
+          {restart && (
+            <Button onClick={handleRestart} variant="outline" size="sm">
+              <RotateCcw className="h-4 w-4 mr-2" />
+              Restart Container
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -326,6 +465,15 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
       {!previewUrl ? (
         <div className="h-full flex flex-col">
           <div className="w-full max-w-md p-6 m-5 rounded-lg bg-white dark:bg-zinc-800 shadow-sm mx-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-medium">Setting up project</h3>
+              {restart && (
+                <Button onClick={handleRestart} variant="ghost" size="sm">
+                  <RotateCcw className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+
             <Progress
               value={(currentStep / totalSteps) * 100}
               className="h-2 mb-6"
@@ -351,7 +499,6 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
             </div>
           </div>
 
-          {/* Terminal */}
           <div className="flex-1 p-4">
             <TerminalComponent
               ref={terminalRef}
@@ -363,16 +510,15 @@ const WebContainerPreview: React.FC<WebContainerPreviewProps> = ({
         </div>
       ) : (
         <div className="h-full flex flex-col">
-          {/* Preview */}
           <div className="flex-1">
             <iframe
               src={previewUrl}
               className="w-full h-full border-none"
               title="WebContainer Preview"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
             />
           </div>
 
-          {/* Terminal at bottom when preview is ready */}
           <div className="h-64 border-t">
             <TerminalComponent
               ref={terminalRef}

@@ -56,7 +56,17 @@ import { findFilePath } from "@/features/playground/lib";
 import ToggleAI from "@/features/playground/components/toggle-ai";
 import { useAISuggestions } from "@/features/ai/hooks/useAISuggestion";
 
+import { useSession } from "next-auth/react"; // Add this import
+
 const Page = () => {
+  // Get session with optimized config
+  const { data: session, status: sessionStatus } = useSession({
+    required: false,
+    //@ts-ignore
+    refetchInterval: 0,
+    refetchOnWindowFocus: false,
+  });
+
   const { id } = useParams<{ id: string }>();
   const [isPreviewVisible, setIsPreviewVisible] = useState(true);
   const { playgroundData, templateData, isLoading, error, saveTemplateData } =
@@ -90,20 +100,26 @@ const Page = () => {
     error: containerError,
     instance,
     writeFileSync,
-
-    // @ts-ignore
-  } = useWebContainer({ templateData });
+  } = useWebContainer({
+    templateData: templateData || { folderName: "Root", items: [] },
+  });
   const lastSyncedContent = useRef<Map<string, string>>(new Map());
 
+  const hasInitializedTemplate = useRef(false);
+
+  // Optimized useEffects
   useEffect(() => {
-    setPlaygroundId(id);
-  }, [id, setPlaygroundId]);
+    if (id) {
+      setPlaygroundId(id);
+    }
+  }, [id]); // Remove setPlaygroundId from dependencies
 
   useEffect(() => {
-    if (templateData && !openFiles.length) {
+    if (templateData && !hasInitializedTemplate.current && !openFiles.length) {
       setTemplateData(templateData);
+      hasInitializedTemplate.current = true;
     }
-  }, [templateData, setTemplateData, openFiles.length]);
+  }, [templateData]); // Remove other dependencies
 
   const wrappedHandleAddFile = useCallback(
     (newFile: TemplateFile, parentPath: string) => {
@@ -292,6 +308,35 @@ const Page = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleSave]);
+
+  if (sessionStatus === "loading") {
+    return (
+      <div className="flex flex-col items-center justify-center h-[calc(100vh-4rem)] p-4">
+        <div className="w-full max-w-md p-6 rounded-lg shadow-sm border">
+          <h2 className="text-xl font-semibold mb-6 text-center">
+            Initializing...
+          </h2>
+          <div className="mb-8">
+            <LoadingStep
+              currentStep={1}
+              step={1}
+              label="Checking authentication"
+            />
+            <LoadingStep
+              currentStep={1}
+              step={2}
+              label="Loading playground data"
+            />
+            <LoadingStep
+              currentStep={1}
+              step={3}
+              label="Setting up environment"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (error) {
     return (

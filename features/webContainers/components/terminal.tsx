@@ -8,11 +8,13 @@ import React, {
   forwardRef,
   useImperativeHandle,
 } from "react";
-import { Terminal } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
-import { WebLinksAddon } from "xterm-addon-web-links";
-import { SearchAddon } from "xterm-addon-search";
-import "xterm/css/xterm.css";
+// Remove direct imports of xterm - we'll load them dynamically
+// import { Terminal } from "xterm";
+// import { FitAddon } from "xterm-addon-fit";
+// import { WebLinksAddon } from "xterm-addon-web-links";
+// import { SearchAddon } from "xterm-addon-search";
+// import "xterm/css/xterm.css";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Search, Copy, Trash2, Download } from "lucide-react";
@@ -38,12 +40,13 @@ const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(
     ref
   ) => {
     const terminalRef = useRef<HTMLDivElement>(null);
-    const term = useRef<Terminal | null>(null);
-    const fitAddon = useRef<FitAddon | null>(null);
-    const searchAddon = useRef<SearchAddon | null>(null);
+    const term = useRef<any>(null); // Changed from Terminal to any since we'll load it dynamically
+    const fitAddon = useRef<any>(null);
+    const searchAddon = useRef<any>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
     const [showSearch, setShowSearch] = useState(false);
+    const [isTerminalLoaded, setIsTerminalLoaded] = useState(false);
 
     // Command line state
     const currentLine = useRef<string>("");
@@ -295,52 +298,69 @@ const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(
       [executeCommand, writePrompt]
     );
 
-    const initializeTerminal = useCallback(() => {
-      if (!terminalRef.current || term.current) return;
+    const initializeTerminal = useCallback(async () => {
+      if (!terminalRef.current || term.current || !isTerminalLoaded) return;
 
-      const terminal = new Terminal({
-        cursorBlink: true,
-        fontFamily: '"Fira Code", "JetBrains Mono", "Consolas", monospace',
-        fontSize: 14,
-        lineHeight: 1.2,
-        letterSpacing: 0,
-        theme: terminalThemes[theme],
-        allowTransparency: false,
-        convertEol: true,
-        scrollback: 1000,
-        tabStopWidth: 4,
-      });
+      try {
+        // Dynamically import xterm modules
+        const [{ Terminal }, { FitAddon }, { WebLinksAddon }, { SearchAddon }] =
+          await Promise.all([
+            import("xterm"),
+            import("xterm-addon-fit"),
+            import("xterm-addon-web-links"),
+            import("xterm-addon-search"),
+          ]);
 
-      // Add addons
-      const fitAddonInstance = new FitAddon();
-      const webLinksAddon = new WebLinksAddon();
-      const searchAddonInstance = new SearchAddon();
+        // Also dynamically import CSS
+        // @ts-ignore
+        await import("xterm/css/xterm.css");
 
-      terminal.loadAddon(fitAddonInstance);
-      terminal.loadAddon(webLinksAddon);
-      terminal.loadAddon(searchAddonInstance);
+        const terminal = new Terminal({
+          cursorBlink: true,
+          fontFamily: '"Fira Code", "JetBrains Mono", "Consolas", monospace',
+          fontSize: 14,
+          lineHeight: 1.2,
+          letterSpacing: 0,
+          theme: terminalThemes[theme],
+          allowTransparency: false,
+          convertEol: true,
+          scrollback: 1000,
+          tabStopWidth: 4,
+        });
 
-      terminal.open(terminalRef.current);
+        // Add addons
+        const fitAddonInstance = new FitAddon();
+        const webLinksAddon = new WebLinksAddon();
+        const searchAddonInstance = new SearchAddon();
 
-      fitAddon.current = fitAddonInstance;
-      searchAddon.current = searchAddonInstance;
-      term.current = terminal;
+        terminal.loadAddon(fitAddonInstance);
+        terminal.loadAddon(webLinksAddon);
+        terminal.loadAddon(searchAddonInstance);
 
-      // Handle terminal input
-      terminal.onData(handleTerminalInput);
+        terminal.open(terminalRef.current);
 
-      // Initial fit
-      setTimeout(() => {
-        fitAddonInstance.fit();
-      }, 100);
+        fitAddon.current = fitAddonInstance;
+        searchAddon.current = searchAddonInstance;
+        term.current = terminal;
 
-      // Welcome message
-      terminal.writeln("🚀 WebContainer Terminal");
-      terminal.writeln("Type 'help' for available commands");
-      writePrompt();
+        // Handle terminal input
+        terminal.onData(handleTerminalInput);
 
-      return terminal;
-    }, [theme, handleTerminalInput, writePrompt]);
+        // Initial fit
+        setTimeout(() => {
+          fitAddonInstance.fit();
+        }, 100);
+
+        // Welcome message
+        terminal.writeln("🚀 WebContainer Terminal");
+        terminal.writeln("Type 'help' for available commands");
+        writePrompt();
+
+        return terminal;
+      } catch (error) {
+        console.error("Failed to load terminal:", error);
+      }
+    }, [theme, handleTerminalInput, writePrompt, isTerminalLoaded]);
 
     const connectToWebContainer = useCallback(async () => {
       if (!webContainerInstance || !term.current) return;
@@ -408,7 +428,14 @@ const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(
       }
     }, []);
 
+    // Load xterm only on client side
     useEffect(() => {
+      setIsTerminalLoaded(true);
+    }, []);
+
+    useEffect(() => {
+      if (!isTerminalLoaded) return;
+
       initializeTerminal();
 
       // Handle resize
@@ -437,13 +464,34 @@ const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(
           term.current = null;
         }
       };
-    }, [initializeTerminal]);
+    }, [initializeTerminal, isTerminalLoaded]);
 
     useEffect(() => {
       if (webContainerInstance && term.current && !isConnected) {
         connectToWebContainer();
       }
     }, [webContainerInstance, connectToWebContainer, isConnected]);
+
+    // Show loading state while terminal is loading
+    if (!isTerminalLoaded) {
+      return (
+        <div
+          className={cn(
+            "flex flex-col h-full bg-background border rounded-lg overflow-hidden",
+            className
+          )}
+        >
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-2"></div>
+              <p className="text-sm text-muted-foreground">
+                Loading terminal...
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div

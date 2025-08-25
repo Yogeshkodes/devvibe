@@ -18,7 +18,10 @@ const Page = async () => {
         <AddNewButton />
         <AddRepoButton />
       </div>
-
+      <div className="text-sm text-red-500 bg-accent mt-4 p-3">
+        Recommended to choose Expressjs template as in project lot of
+        optimization is going on other templates will take more time to load
+      </div>
       <div className="mt-10 flex flex-col justify-center items-center w-full">
         {playgrounds && playgrounds.length === 0 ? (
           <EmptyState

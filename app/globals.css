@@ -125,3 +125,7 @@
   opacity: 0.5;
   color: #777;
 }
+
+body {
+  @apply antialiased;
+}

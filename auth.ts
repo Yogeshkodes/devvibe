@@ -1,3 +1,5 @@
+// Replace your existing auth.js with this optimized version:
+
 import NextAuth from "next-auth";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { db } from "./lib/db";
@@ -8,6 +10,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(db),
   session: {
     strategy: "jwt",
+    maxAge: 30 * 24 * 60 * 60, // 30 days
+    updateAge: 24 * 60 * 60, // Only update session once per day (reduces DB calls)
   },
   secret: process.env.AUTH_SECRET,
 
@@ -50,7 +54,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           },
         });
 
-        if (!newUser) return false; // Return false if user creation fails
+        if (!newUser) return false;
       } else {
         // Link the account if user exists
         const existingAccount = await db.account.findUnique({
@@ -86,28 +90,52 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return true;
     },
 
-    async jwt({ token, user, account }) {
-      if (!token.sub) return token;
-      const existingUser = await getUserById(token.sub);
+    // 🚀 FIXED: Only do DB queries on sign-in, not every session check
+    async jwt({ token, user, account, trigger }) {
+      // Only run expensive DB queries when signing in or when token is missing critical data
+      if (trigger === "signIn" || (!token.role && token.sub)) {
+        if (!token.sub) return token;
 
-      if (!existingUser) return token;
+        try {
+          console.log("🔍 JWT Callback: Fetching user data for", token.sub);
+          const existingUser = await getUserById(token.sub);
 
-      const exisitingAccount = await getAccountByUserId(existingUser.id);
+          if (!existingUser) {
+            console.warn("⚠️ JWT Callback: User not found for", token.sub);
+            return token;
+          }
 
-      token.name = existingUser.name;
-      token.email = existingUser.email;
-      token.role = existingUser.role;
+          // Cache ALL user data in JWT token to prevent future DB calls
+          token.name = existingUser.name;
+          token.email = existingUser.email;
+          token.role = existingUser.role;
+          token.image = existingUser.image;
+
+          console.log("✅ JWT Callback: User data cached in token");
+        } catch (error) {
+          console.error("❌ JWT Callback: Error fetching user:", error);
+        }
+      } else {
+        // Just return the existing token with cached data - NO DB QUERIES
+        console.log("✅ JWT Callback: Using cached token data (no DB query)");
+      }
 
       return token;
     },
+
+    // 🚀 OPTIMIZED: No database queries - just use JWT token data
     async session({ session, token }) {
-      // Attach the user ID from the token to the session
+      console.log("🔍 Session Callback: Populating session from token");
+
+      // Populate session from cached JWT token data - NO DB QUERIES
       if (token.sub && session.user) {
         session.user.id = token.sub;
-      }
-
-      if (token.sub && session.user) {
         session.user.role = token.role;
+        session.user.name = token.name;
+        //@ts-ignore
+        session.user.email = token.email;
+        //@ts-ignore
+        session.user.image = token.image;
       }
 
       return session;

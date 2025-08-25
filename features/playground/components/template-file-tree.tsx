@@ -155,7 +155,7 @@ const TemplateFileTree = ({
           <SidebarGroupLabel>{title}</SidebarGroupLabel>
 
           <DropdownMenu>
-            <DropdownMenuTrigger>
+            <DropdownMenuTrigger asChild>
               <SidebarGroupAction>
                 <Plus className="h-4 w-4" />
               </SidebarGroupAction>

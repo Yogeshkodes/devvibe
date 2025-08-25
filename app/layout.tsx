@@ -1,20 +1,13 @@
-import type { Metadata } from "next";
-import { Poppins } from "next/font/google";
+import { type Metadata } from "next";
+import { SessionProvider } from "next-auth/react";
 import "./globals.css";
 import { ThemeProvider } from "@/components/provider/theme-provider";
-import { SessionProvider } from "next-auth/react";
 import { auth } from "@/auth";
 import { Toaster } from "@/components/ui/sonner";
 
-const poppins = Poppins({
-  subsets: ["latin"],
-  weight: ["100", "200", "300", "400", "500", "600", "700", "800", "900"],
-});
-
 export const metadata: Metadata = {
-  title: "DEV-vibe - Editor",
-  description:
-    "DEV-vibe - Editor - Code Editor For VibeCoders is a free online code editor that lets you write, debug, and run your code in the browser. It is an open source editor that is easy to use and has a simple interface. It is also a great way to learn programming and get started with coding.",
+  title: "DevVibe",
+  description: "Online Code Playground",
 };
 
 export default async function RootLayout({
@@ -26,7 +19,7 @@ export default async function RootLayout({
   return (
     <SessionProvider session={session}>
       <html lang="en" suppressHydrationWarning>
-        <body className={` ${poppins.className} antialiased`}>
+        <body className="antialiased" suppressHydrationWarning>
           <ThemeProvider
             attribute="class"
             defaultTheme="system"

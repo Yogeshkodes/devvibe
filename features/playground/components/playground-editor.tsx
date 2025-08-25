@@ -41,7 +41,9 @@ export const PlaygroundEditor = ({
   const isAcceptingSuggestionRef = useRef(false);
   const suggestionAcceptedRef = useRef(false);
   const suggestionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const tabCommandRef = useRef<any>(null);
+  // Changed: Store disposables array instead of single command ref
+  const disposablesRef = useRef<any[]>([]);
+  const lastAcceptedSuggestionRef = useRef<string | null>(null);
 
   const generateSuggestionId = () =>
     `suggestion-${Date.now()}-${Math.random()}`;
@@ -81,7 +83,6 @@ export const PlaygroundEditor = ({
               documentation: "Press Tab to accept",
               sortText: "0000",
               filterText: "",
-              // Prevent Monaco from inserting text itself
               insertTextRules:
                 monaco.languages.CompletionItemInsertTextRule.KeepWhitespace,
             },
@@ -108,22 +109,41 @@ export const PlaygroundEditor = ({
       !currentSuggestionRef.current
     )
       return false;
+
+    // Prevent duplicate acceptance
     if (isAcceptingSuggestionRef.current || suggestionAcceptedRef.current)
       return false;
 
+    const suggestionText = currentSuggestionRef.current.text.replace(/\r/g, "");
+
+    // Check if this suggestion was just accepted
+    if (lastAcceptedSuggestionRef.current === suggestionText) {
+      console.log("Suggestion already recently accepted, skipping");
+      return false;
+    }
+
     isAcceptingSuggestionRef.current = true;
     suggestionAcceptedRef.current = true;
+    lastAcceptedSuggestionRef.current = suggestionText;
 
     try {
       const editor = editorRef.current;
       const monaco = monacoRef.current;
-      const cleanSuggestionText = currentSuggestionRef.current.text.replace(
-        /\r/g,
-        ""
-      );
       const position = editor.getPosition();
 
-      // Safety: Prevent duplicate if already inserted
+      // Safety check: Prevent duplicate if already inserted
+      const currentLineText = editor
+        .getModel()
+        .getLineContent(position.lineNumber);
+      const textAfterCursor = currentLineText.substring(position.column - 1);
+
+      if (textAfterCursor.startsWith(suggestionText)) {
+        console.log("Suggestion already present at cursor position");
+        clearCurrentSuggestion();
+        return false;
+      }
+
+      // Check if suggestion is already in the model at cursor
       const modelTextAtCursor = editor
         .getModel()
         .getValueInRange(
@@ -131,12 +151,16 @@ export const PlaygroundEditor = ({
             position.lineNumber,
             position.column,
             position.lineNumber,
-            position.column + cleanSuggestionText.length
+            Math.min(
+              position.column + suggestionText.length,
+              currentLineText.length + 1
+            )
           )
         );
 
-      if (modelTextAtCursor === cleanSuggestionText) {
+      if (modelTextAtCursor === suggestionText) {
         console.log("Suggestion already inserted at cursor");
+        clearCurrentSuggestion();
         return false;
       }
 
@@ -147,15 +171,18 @@ export const PlaygroundEditor = ({
         position.column
       );
 
-      editor.executeEdits("ai-suggestion", [
-        { range, text: cleanSuggestionText, forceMoveMarkers: true },
+      // Use executeEdits with a unique source
+      const editId = `ai-suggestion-${Date.now()}`;
+      editor.executeEdits(editId, [
+        { range, text: suggestionText, forceMoveMarkers: true },
       ]);
 
-      const lines = cleanSuggestionText.split("\n");
+      // Calculate new cursor position
+      const lines = suggestionText.split("\n");
       const endLine = position.lineNumber + lines.length - 1;
       const endColumn =
         lines.length === 1
-          ? position.column + cleanSuggestionText.length
+          ? position.column + suggestionText.length
           : lines[lines.length - 1].length + 1;
 
       editor.setPosition({ lineNumber: endLine, column: endColumn });
@@ -163,23 +190,31 @@ export const PlaygroundEditor = ({
       clearCurrentSuggestion();
       onAcceptSuggestion(editor, monaco);
 
+      // Clear the last accepted reference after a delay
+      setTimeout(() => {
+        lastAcceptedSuggestionRef.current = null;
+      }, 2000);
+
       return true;
     } catch (e) {
       console.error("Error accepting suggestion", e);
       return false;
     } finally {
       isAcceptingSuggestionRef.current = false;
+      // Keep suggestionAcceptedRef true for longer to prevent immediate re-acceptance
       setTimeout(() => {
         suggestionAcceptedRef.current = false;
-      }, 1000);
+      }, 1500);
     }
   }, [onAcceptSuggestion, clearCurrentSuggestion]);
 
   useEffect(() => {
     if (!editorRef.current || !monacoRef.current) return;
 
+    // Clean up previous provider
     if (inlineCompletionProviderRef.current) {
       inlineCompletionProviderRef.current.dispose();
+      inlineCompletionProviderRef.current = null;
     }
 
     currentSuggestionRef.current = null;
@@ -194,13 +229,16 @@ export const PlaygroundEditor = ({
           provider
         );
 
+      // Trigger inline suggestion with a slight delay
       setTimeout(() => {
-        editorRef.current?.trigger(
-          "ai",
-          "editor.action.inlineSuggest.trigger",
-          null
-        );
-      }, 50);
+        if (editorRef.current) {
+          editorRef.current.trigger(
+            "ai",
+            "editor.action.inlineSuggest.trigger",
+            null
+          );
+        }
+      }, 100);
     }
 
     return () => {
@@ -219,40 +257,71 @@ export const PlaygroundEditor = ({
 
     editor.updateOptions({
       ...defaultEditorOptions,
-      inlineSuggest: { enabled: true },
-      suggest: { preview: false },
+      inlineSuggest: {
+        enabled: true,
+        showToolbar: "onHover",
+      },
+      suggest: {
+        preview: false,
+        showInlineDetails: true,
+      },
       quickSuggestions: { other: true, comments: false, strings: false },
       cursorSmoothCaretAnimation: "on",
     });
 
-    if (tabCommandRef.current) {
-      tabCommandRef.current.dispose();
-    }
-
-    tabCommandRef.current = editor.addCommand(monaco.KeyCode.Tab, () => {
-      if (isAcceptingSuggestionRef.current || suggestionAcceptedRef.current) {
-        editor.trigger("keyboard", "tab", null);
-        return;
+    // Clear previous disposables
+    disposablesRef.current.forEach((disposable) => {
+      if (disposable && typeof disposable.dispose === "function") {
+        disposable.dispose();
       }
-
-      if (currentSuggestionRef.current) {
-        const accepted = acceptCurrentSuggestion();
-        if (accepted) return;
-      }
-
-      editor.trigger("keyboard", "tab", null);
     });
+    disposablesRef.current = [];
 
-    editor.addCommand(monaco.KeyCode.Escape, () => {
+    // Override Tab key behavior - addCommand returns a disposable
+    const tabCommand = editor.addCommand(
+      monaco.KeyCode.Tab,
+      () => {
+        // If we're already accepting a suggestion, ignore
+        if (isAcceptingSuggestionRef.current) {
+          return;
+        }
+
+        // If there's a current suggestion, try to accept it
+        if (currentSuggestionRef.current && !suggestionAcceptedRef.current) {
+          const accepted = acceptCurrentSuggestion();
+          if (accepted) {
+            return; // Don't execute default tab behavior
+          }
+        }
+
+        // Default tab behavior
+        editor.trigger("keyboard", "tab", null);
+      },
+      // Override default tab behavior when we have suggestions
+      "acceptSuggestion"
+    );
+
+    // Escape key to reject suggestion
+    const escapeCommand = editor.addCommand(monaco.KeyCode.Escape, () => {
       if (currentSuggestionRef.current) {
         onRejectSuggestion(editor);
         clearCurrentSuggestion();
       }
     });
 
-    editor.onDidChangeCursorPosition(() => {
-      if (suggestionTimeoutRef.current)
+    // Store disposables (Monaco commands are typically disposable objects)
+    if (tabCommand && typeof tabCommand.dispose === "function") {
+      disposablesRef.current.push(tabCommand);
+    }
+    if (escapeCommand && typeof escapeCommand.dispose === "function") {
+      disposablesRef.current.push(escapeCommand);
+    }
+
+    // Cursor position change handler
+    const cursorPositionDisposable = editor.onDidChangeCursorPosition(() => {
+      if (suggestionTimeoutRef.current) {
         clearTimeout(suggestionTimeoutRef.current);
+      }
 
       if (
         !isAcceptingSuggestionRef.current &&
@@ -265,24 +334,36 @@ export const PlaygroundEditor = ({
       }
     });
 
-    editor.onDidChangeModelContent((e: any) => {
+    // Content change handler
+    const contentChangeDisposable = editor.onDidChangeModelContent((e: any) => {
+      // Ignore changes we're making ourselves
       if (isAcceptingSuggestionRef.current) return;
 
+      // Clear suggestions on manual edits (unless it's our suggestion being applied)
       if (
         currentSuggestionRef.current &&
         !suggestionAcceptedRef.current &&
         e.changes.length > 0
       ) {
         const change = e.changes[0];
+        const changeText = change.text.replace(/\r/g, "");
+        const suggestionText = currentSuggestionRef.current.text.replace(
+          /\r/g,
+          ""
+        );
+
+        // If the change matches our suggestion, don't clear it
         if (
-          change.text === currentSuggestionRef.current.text ||
-          change.text === currentSuggestionRef.current.text.replace(/\r/g, "")
+          changeText === suggestionText ||
+          changeText === suggestionText.substring(0, changeText.length)
         ) {
           return;
         }
+
         clearCurrentSuggestion();
       }
 
+      // Trigger new suggestions on certain characters
       const triggers = ["\n", "{", ".", "=", "(", ",", ":", ";"];
       if (e.changes.length > 0 && triggers.includes(e.changes[0].text)) {
         setTimeout(() => {
@@ -293,9 +374,15 @@ export const PlaygroundEditor = ({
           ) {
             onTriggerSuggestion("completion", editorRef.current);
           }
-        }, 100);
+        }, 150);
       }
     });
+
+    // Store event disposables
+    disposablesRef.current.push(
+      cursorPositionDisposable,
+      contentChangeDisposable
+    );
 
     updateEditorLanguage();
   };
@@ -317,13 +404,34 @@ export const PlaygroundEditor = ({
     updateEditorLanguage();
   }, [activeFile]);
 
+  // Fixed cleanup effect
   useEffect(() => {
     return () => {
-      if (suggestionTimeoutRef.current)
+      // Clear timeout
+      if (suggestionTimeoutRef.current) {
         clearTimeout(suggestionTimeoutRef.current);
-      if (inlineCompletionProviderRef.current)
-        inlineCompletionProviderRef.current.dispose();
-      if (tabCommandRef.current) tabCommandRef.current.dispose();
+      }
+
+      // Dispose inline completion provider
+      if (inlineCompletionProviderRef.current) {
+        try {
+          inlineCompletionProviderRef.current.dispose();
+        } catch (e) {
+          console.warn("Error disposing inline completion provider:", e);
+        }
+      }
+
+      // Dispose all stored disposables
+      disposablesRef.current.forEach((disposable) => {
+        if (disposable && typeof disposable.dispose === "function") {
+          try {
+            disposable.dispose();
+          } catch (e) {
+            console.warn("Error disposing editor resource:", e);
+          }
+        }
+      });
+      disposablesRef.current = [];
     };
   }, []);
 

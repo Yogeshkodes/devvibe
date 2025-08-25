@@ -25,6 +25,10 @@ export const useAISuggestions = (): UseAISuggestionsReturn => {
     isEnabled: true,
   });
 
+  // Add a ref to track ongoing requests and prevent duplicates
+  const pendingRequestRef = useRef<string | null>(null);
+  const lastRequestContentRef = useRef<string>("");
+
   const toggleEnabled = useCallback(() => {
     console.log("Toggling AI suggestions");
     setState((prev) => ({ ...prev, isEnabled: !prev.isEnabled }));
@@ -32,80 +36,97 @@ export const useAISuggestions = (): UseAISuggestionsReturn => {
 
   const fetchSuggestion = useCallback(async (type: string, editor: any) => {
     console.log("Fetching AI suggestion...");
-    console.log("AI Suggestions Enabled:", state.isEnabled);
-    console.log("Editor Instance Available:", !!editor);
+    
+    if (!state.isEnabled) {
+      console.warn("AI suggestions are disabled.");
+      return;
+    }
 
-    // Use functional state update to get fresh state
-    setState((currentState) => {
-      if (!currentState.isEnabled) {
-        console.warn("AI suggestions are disabled.");
-        return currentState;
+    if (!editor) {
+      console.warn("Editor instance is not available.");
+      return;
+    }
+
+    const model = editor.getModel();
+    const cursorPosition = editor.getPosition();
+
+    if (!model || !cursorPosition) {
+      console.warn("Editor model or cursor position is not available.");
+      return;
+    }
+
+    // Create a unique request ID to prevent duplicate requests
+    const currentContent = model.getValue();
+    const requestKey = `${currentContent}_${cursorPosition.lineNumber}_${cursorPosition.column}_${type}`;
+    
+    // Prevent duplicate requests
+    if (pendingRequestRef.current === requestKey || state.isLoading) {
+      console.log("Duplicate request prevented");
+      return;
+    }
+
+    // Also prevent if content hasn't changed significantly
+    if (lastRequestContentRef.current === currentContent && state.suggestion) {
+      console.log("Content hasn't changed, skipping request");
+      return;
+    }
+
+    pendingRequestRef.current = requestKey;
+    lastRequestContentRef.current = currentContent;
+
+    setState((prev) => ({ ...prev, isLoading: true }));
+
+    try {
+      const payload = {
+        fileContent: currentContent,
+        cursorLine: cursorPosition.lineNumber - 1,
+        cursorColumn: cursorPosition.column - 1,
+        suggestionType: type,
+      };
+      console.log("Request payload:", payload);
+
+      const response = await fetch("/api/code-suggestion", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API responded with status ${response.status}`);
       }
 
-      if (!editor) {
-        console.warn("Editor instance is not available.");
-        return currentState;
-      }
+      const data = await response.json();
+      console.log("API response:", data);
 
-      const model = editor.getModel();
-      const cursorPosition = editor.getPosition();
-
-      if (!model || !cursorPosition) {
-        console.warn("Editor model or cursor position is not available.");
-        return currentState;
-      }
-
-      // Set loading state immediately
-      const newState = { ...currentState, isLoading: true };
-
-      // Perform the async operation
-      (async () => {
-        try {
-          const payload = {
-            fileContent: model.getValue(),
-            cursorLine: cursorPosition.lineNumber - 1,
-            cursorColumn: cursorPosition.column - 1,
-            suggestionType: type,
-          };
-          console.log("Request payload:", payload);
-
-          const response = await fetch("/api/code-suggestion", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-
-          if (!response.ok) {
-            throw new Error(`API responded with status ${response.status}`);
-          }
-
-          const data = await response.json();
-          console.log("API response:", data);
-
-          if (data.suggestion) {
-            const suggestionText = data.suggestion.trim();
-            setState((prev) => ({
-              ...prev,
-              suggestion: suggestionText,
-              position: {
-                line: cursorPosition.lineNumber,
-                column: cursorPosition.column,
-              },
-              isLoading: false,
-            }));
-          } else {
-            console.warn("No suggestion received from API.");
-            setState((prev) => ({ ...prev, isLoading: false }));
-          }
-        } catch (error) {
-          console.error("Error fetching code suggestion:", error);
-          setState((prev) => ({ ...prev, isLoading: false }));
+      // Only update state if this is still the current request
+      if (pendingRequestRef.current === requestKey) {
+        if (data.suggestion) {
+          const suggestionText = data.suggestion.trim();
+          setState((prev) => ({
+            ...prev,
+            suggestion: suggestionText,
+            position: {
+              line: cursorPosition.lineNumber,
+              column: cursorPosition.column,
+            },
+            isLoading: false,
+          }));
+        } else {
+          console.warn("No suggestion received from API.");
+          setState((prev) => ({ ...prev, isLoading: false, suggestion: null }));
         }
-      })();
-
-      return newState;
-    });
-  }, []); // Remove state.isEnabled from dependencies to prevent stale closures
+      }
+    } catch (error) {
+      console.error("Error fetching code suggestion:", error);
+      if (pendingRequestRef.current === requestKey) {
+        setState((prev) => ({ ...prev, isLoading: false, suggestion: null }));
+      }
+    } finally {
+      if (pendingRequestRef.current === requestKey) {
+        pendingRequestRef.current = null;
+      }
+    }
+  }, [state.isEnabled, state.isLoading, state.suggestion]);
 
   const acceptSuggestion = useCallback((editor: any, monaco: any) => {
     setState((currentState) => {
@@ -124,9 +145,36 @@ export const useAISuggestions = (): UseAISuggestionsReturn => {
         ""
       );
 
-      editor.executeEdits("", [
+      // Check if the suggestion is already at the cursor position to prevent duplicates
+      const model = editor.getModel();
+      const currentPosition = editor.getPosition();
+      const textAtCursor = model.getValueInRange(
+        new monaco.Range(
+          currentPosition.lineNumber,
+          currentPosition.column,
+          currentPosition.lineNumber,
+          currentPosition.column + sanitizedSuggestion.length
+        )
+      );
+
+      if (textAtCursor === sanitizedSuggestion) {
+        console.log("Suggestion already exists at cursor, not inserting");
+        return {
+          ...currentState,
+          suggestion: null,
+          position: null,
+          decoration: [],
+        };
+      }
+
+      editor.executeEdits("ai-suggestion", [
         {
-          range: new monaco.Range(line, column, line, column),
+          range: new monaco.Range(
+            currentPosition.lineNumber,
+            currentPosition.column,
+            currentPosition.lineNumber,
+            currentPosition.column
+          ),
           text: sanitizedSuggestion,
           forceMoveMarkers: true,
         },
@@ -136,6 +184,10 @@ export const useAISuggestions = (): UseAISuggestionsReturn => {
       if (editor && currentState.decoration.length > 0) {
         editor.deltaDecorations(currentState.decoration, []);
       }
+
+      // Clear the request tracking
+      pendingRequestRef.current = null;
+      lastRequestContentRef.current = model.getValue();
 
       return {
         ...currentState,
@@ -151,6 +203,10 @@ export const useAISuggestions = (): UseAISuggestionsReturn => {
       if (editor && currentState.decoration.length > 0) {
         editor.deltaDecorations(currentState.decoration, []);
       }
+      
+      // Clear the request tracking
+      pendingRequestRef.current = null;
+      
       return {
         ...currentState,
         suggestion: null,
@@ -165,6 +221,10 @@ export const useAISuggestions = (): UseAISuggestionsReturn => {
       if (editor && currentState.decoration.length > 0) {
         editor.deltaDecorations(currentState.decoration, []);
       }
+      
+      // Clear the request tracking
+      pendingRequestRef.current = null;
+      
       return {
         ...currentState,
         suggestion: null,

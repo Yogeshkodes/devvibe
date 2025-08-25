@@ -1,9 +1,11 @@
+// app/api/template/[id]/route.ts
 import {
   readTemplateStructureFromJson,
   saveTemplateStructureToJson,
 } from "@/features/playground/lib/path-to-json";
 import { db } from "@/lib/db";
 import { templatePaths } from "@/lib/template";
+import { templateCache } from "@/lib/template-cache"; // Add this import
 import path from "path";
 import fs from "fs/promises";
 import { NextRequest } from "next/server";
@@ -29,6 +31,23 @@ export async function GET(
   if (!id) {
     return Response.json({ error: "Missing playground ID" }, { status: 400 });
   }
+
+  // 🚀 NEW: Check cache first
+  const cacheKey = `template-${id}`;
+  const cachedData = templateCache.get(cacheKey);
+
+  if (cachedData) {
+    console.log(`✅ Cache hit for template ${id}`);
+    return Response.json(cachedData, {
+      status: 200,
+      headers: {
+        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
+        "X-Cache": "HIT",
+      },
+    });
+  }
+
+  console.log(`🔄 Processing template ${id} - cache miss`);
 
   const playground = await db.playground.findUnique({
     where: { id },
@@ -64,14 +83,24 @@ export async function GET(
       );
     }
 
+    // Clean up the output file
     await fs.unlink(outputFile);
 
-    return Response.json(
-      { success: true, templateJson: result },
-      { status: 200 }
-    );
+    // 🚀 NEW: Prepare response data
+    const responseData = { success: true, templateJson: result };
+
+    // 🚀 NEW: Cache the result for 5 minutes
+    templateCache.set(cacheKey, responseData, 5 * 60 * 1000);
+
+    return Response.json(responseData, {
+      status: 200,
+      headers: {
+        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
+        "X-Cache": "MISS",
+      },
+    });
   } catch (error) {
-    console.error("Error generating template JSON:", error);
+    console.error("❌ Error generating template JSON:", error);
     return Response.json(
       { error: "Failed to generate template" },
       { status: 500 }
