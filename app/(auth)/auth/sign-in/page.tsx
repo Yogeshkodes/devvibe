@@ -5,7 +5,7 @@ import React from "react";
 function SignInPage() {
   return (
     <div className="flex flex-col items-center justify-center gap-5 space-y-6">
-      <Image src={"/logo.svg"} alt="Logo-Image" height={300} width={300} />
+      <Image src={"/login.svg"} alt="Logo-Image" height={300} width={300} />
       <SignInFormClient />
     </div>
   );

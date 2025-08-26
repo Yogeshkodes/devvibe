@@ -5,7 +5,7 @@ import {
 } from "@/features/playground/lib/path-to-json";
 import { db } from "@/lib/db";
 import { templatePaths } from "@/lib/template";
-import { templateCache } from "@/lib/template-cache"; // Add this import
+import { templateCache } from "@/lib/template-cache";
 import path from "path";
 import fs from "fs/promises";
 import { NextRequest } from "next/server";
@@ -32,44 +32,62 @@ export async function GET(
     return Response.json({ error: "Missing playground ID" }, { status: 400 });
   }
 
-  // 🚀 NEW: Check cache first
-  const cacheKey = `template-${id}`;
-  const cachedData = templateCache.get(cacheKey);
-
-  if (cachedData) {
-    console.log(`✅ Cache hit for template ${id}`);
-    return Response.json(cachedData, {
-      status: 200,
-      headers: {
-        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
-        "X-Cache": "HIT",
-      },
-    });
-  }
-
-  console.log(`🔄 Processing template ${id} - cache miss`);
-
-  const playground = await db.playground.findUnique({
-    where: { id },
-  });
-
-  if (!playground) {
-    return Response.json({ error: "Playground not found" }, { status: 404 });
-  }
-
-  const templateKey = playground.template as keyof typeof templatePaths;
-  const templatePath = templatePaths[templateKey];
-
-  if (!templatePath) {
-    return Response.json({ error: "Invalid template" }, { status: 404 });
-  }
-
   try {
+    // 🚀 NEW: Check cache first
+    const cacheKey = `template-${id}`;
+    const cachedData = templateCache.get(cacheKey);
+
+    if (cachedData) {
+      console.log(`✅ Cache hit for template ${id}`);
+      return Response.json(cachedData, {
+        status: 200,
+        headers: {
+          "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
+          "X-Cache": "HIT",
+        },
+      });
+    }
+
+    console.log(`🔄 Processing template ${id} - cache miss`);
+
+    // Database query with error handling
+    const playground = await db.playground.findUnique({
+      where: { id },
+    });
+
+    if (!playground) {
+      console.error(`❌ Playground not found: ${id}`);
+      return Response.json({ error: "Playground not found" }, { status: 404 });
+    }
+
+    const templateKey = playground.template as keyof typeof templatePaths;
+    const templatePath = templatePaths[templateKey];
+
+    if (!templatePath) {
+      console.error(`❌ Invalid template key: ${templateKey}`);
+      return Response.json({ error: "Invalid template" }, { status: 404 });
+    }
+
+    // 🚀 FIXED: Use /tmp directory for Vercel compatibility
     const inputPath = path.join(process.cwd(), templatePath);
-    const outputFile = path.join(process.cwd(), `output/${templateKey}.json`);
+
+    // Create unique filename to avoid conflicts in serverless environment
+    const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const outputFile = path.join("/tmp", `${templateKey}-${uniqueId}.json`);
 
     console.log("Input Path:", inputPath);
     console.log("Output Path:", outputFile);
+
+    // Check if input path exists
+    try {
+      await fs.access(inputPath);
+    } catch (error) {
+      console.error(`❌ Input path not accessible: ${inputPath}`, error);
+      return Response.json(
+        { error: "Template file not found" },
+        { status: 404 }
+      );
+    }
 
     // Save and read the template structure
     await saveTemplateStructureToJson(inputPath, outputFile);
@@ -77,14 +95,20 @@ export async function GET(
 
     // Validate the JSON structure before saving
     if (!validateJsonStructure(result.items)) {
+      console.error("❌ Invalid JSON structure generated");
       return Response.json(
         { error: "Invalid JSON structure" },
         { status: 500 }
       );
     }
 
-    // Clean up the output file
-    await fs.unlink(outputFile);
+    // Clean up the output file (with error handling)
+    try {
+      await fs.unlink(outputFile);
+    } catch (unlinkError) {
+      console.warn("⚠️ Failed to cleanup temp file:", unlinkError);
+      // Don't fail the request if cleanup fails
+    }
 
     // 🚀 NEW: Prepare response data
     const responseData = { success: true, templateJson: result };
@@ -100,9 +124,20 @@ export async function GET(
       },
     });
   } catch (error) {
-    console.error("❌ Error generating template JSON:", error);
+    console.error("❌ Error in template API:", error);
+
+    // More detailed error logging
+    if (error instanceof Error) {
+      console.error("Error message:", error.message);
+      console.error("Error stack:", error.stack);
+    }
+
     return Response.json(
-      { error: "Failed to generate template" },
+      {
+        error: "Failed to generate template",
+        details:
+          process.env.NODE_ENV === "development" ? error.message : undefined,
+      },
       { status: 500 }
     );
   }
