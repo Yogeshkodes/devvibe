@@ -9,6 +9,12 @@ import React, {
   useImperativeHandle,
 } from "react";
 
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import "@xterm/xterm/css/xterm.css";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Search, Copy, Trash2, Download } from "lucide-react";
@@ -34,9 +40,9 @@ const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(
     ref
   ) => {
     const terminalRef = useRef<HTMLDivElement>(null);
-    const term = useRef<any>(null); // Changed from Terminal to any since we'll load it dynamically
-    const fitAddon = useRef<any>(null);
-    const searchAddon = useRef<any>(null);
+    const term = useRef<Terminal | null>(null);
+    const fitAddon = useRef<FitAddon | null>(null);
+    const searchAddon = useRef<SearchAddon | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
     const [showSearch, setShowSearch] = useState(false);
@@ -296,19 +302,7 @@ const TerminalComponent = forwardRef<TerminalRef, TerminalProps>(
       if (!terminalRef.current || term.current || !isTerminalLoaded) return;
 
       try {
-        // Dynamically import xterm modules
-        const [{ Terminal }, { FitAddon }, { WebLinksAddon }, { SearchAddon }] =
-          await Promise.all([
-            import("xterm"),
-            import("xterm-addon-fit"),
-            import("xterm-addon-web-links"),
-            import("xterm-addon-search"),
-          ]);
-
-        // Also dynamically import CSS
-        // @ts-ignore
-        await import("xterm/css/xterm.css");
-
+        // Use static imports since we already have them at the top
         const terminal = new Terminal({
           cursorBlink: true,
           fontFamily: '"Fira Code", "JetBrains Mono", "Consolas", monospace',
