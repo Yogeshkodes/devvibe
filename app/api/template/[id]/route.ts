@@ -4,11 +4,12 @@ import {
   saveTemplateStructureToJson,
 } from "@/features/playground/lib/path-to-json";
 import { db } from "@/lib/db";
-import { templatePaths } from "@/lib/template";
+import { getTemplatePath } from "@/lib/template";
 import { templateCache } from "@/lib/template-cache";
 import path from "path";
-import fs from "fs/promises";
-import { NextRequest } from "next/server";
+import os from "os";
+import { NextRequest, NextResponse } from "next/server";
+import { promises as fs } from "fs";
 
 // Helper function to ensure valid JSON
 function validateJsonStructure(data: unknown): boolean {
@@ -29,17 +30,20 @@ export async function GET(
   const id = param.id;
 
   if (!id) {
-    return Response.json({ error: "Missing playground ID" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing playground ID" },
+      { status: 400 }
+    );
   }
 
   try {
-    // 🚀 NEW: Check cache first
+    // Check cache first
     const cacheKey = `template-${id}`;
     const cachedData = templateCache.get(cacheKey);
 
     if (cachedData) {
       console.log(`✅ Cache hit for template ${id}`);
-      return Response.json(cachedData, {
+      return NextResponse.json(cachedData, {
         status: 200,
         headers: {
           "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
@@ -57,57 +61,51 @@ export async function GET(
 
     if (!playground) {
       console.error(`❌ Playground not found: ${id}`);
-      return Response.json({ error: "Playground not found" }, { status: 404 });
-    }
-
-    const templateKey = playground.template as keyof typeof templatePaths;
-    const templatePath = templatePaths[templateKey];
-
-    if (!templatePath) {
-      console.error(`❌ Invalid template key: ${templateKey}`);
-      return Response.json({ error: "Invalid template" }, { status: 404 });
-    }
-
-    // 🚀 FIXED: Use /tmp directory for Vercel compatibility
-    const inputPath = path.join(process.cwd(), templatePath);
-
-    // Create unique filename to avoid conflicts in serverless environment
-    const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const outputFile = path.join("/tmp", `${templateKey}-${uniqueId}.json`);
-
-    console.log("Input Path:", inputPath);
-    console.log("Output Path:", outputFile);
-
-    // Check if input path exists
-    try {
-      await fs.access(inputPath);
-    } catch (error) {
-      console.error(`❌ Input path not accessible: ${inputPath}`, error);
-      return Response.json(
-        { error: "Template file not found" },
+      return NextResponse.json(
+        { error: "Playground not found" },
         { status: 404 }
       );
     }
 
+    const templateKey = playground.template as keyof typeof templatePaths;
+    const templatePath = getTemplatePath(templateKey);
+
+    // Ensure template directory exists
+    try {
+      await fs.access(templatePath);
+    } catch (error) {
+      console.error(`❌ Template path not accessible: ${templatePath}`, error);
+      return NextResponse.json(
+        { error: "Template not found" },
+        { status: 404 }
+      );
+    }
+
+    // Generate temporary file path
+    const tmpDir = process.env.VERCEL ? "/tmp" : os.tmpdir();
+    const outputFile = path.join(tmpDir, `${id}-${Date.now()}.json`);
+
+    console.log("Template Path:", templatePath);
+    console.log("Output File:", outputFile);
+
     // Save and read the template structure
-    await saveTemplateStructureToJson(inputPath, outputFile);
+    await saveTemplateStructureToJson(templatePath, outputFile);
     const result = await readTemplateStructureFromJson(outputFile);
 
     // Validate the JSON structure before saving
     if (!validateJsonStructure(result.items)) {
       console.error("❌ Invalid JSON structure generated");
-      return Response.json(
+      return NextResponse.json(
         { error: "Invalid JSON structure" },
         { status: 500 }
       );
     }
 
-    // Clean up the output file (with error handling)
+    // Cleanup temp file
     try {
       await fs.unlink(outputFile);
-    } catch (unlinkError) {
-      console.warn("⚠️ Failed to cleanup temp file:", unlinkError);
-      // Don't fail the request if cleanup fails
+    } catch (error) {
+      console.warn("⚠️ Failed to cleanup temp file:", error);
     }
 
     // 🚀 NEW: Prepare response data
@@ -116,7 +114,7 @@ export async function GET(
     // 🚀 NEW: Cache the result for 5 minutes
     templateCache.set(cacheKey, responseData, 5 * 60 * 1000);
 
-    return Response.json(responseData, {
+    return NextResponse.json(responseData, {
       status: 200,
       headers: {
         "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60",
@@ -132,7 +130,7 @@ export async function GET(
       console.error("Error stack:", error.stack);
     }
 
-    return Response.json(
+    return NextResponse.json(
       {
         error: "Failed to generate template",
         details:

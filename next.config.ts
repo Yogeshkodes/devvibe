@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  output: "standalone",
+  outputFileTracingRoot: process.env.VERCEL ? undefined : process.cwd(),
   eslint: {
     ignoreDuringBuilds: true,
   },
@@ -21,7 +22,6 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        // Apply to all routes
         source: "/:path*",
         headers: [
           {

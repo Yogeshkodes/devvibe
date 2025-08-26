@@ -7,7 +7,8 @@
     "build": "npx prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+     "vercel-build": "cp -r starters-main .next/standalone/starters-main && next build"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.10.0",
